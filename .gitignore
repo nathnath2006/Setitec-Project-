@@ -1,0 +1,11 @@
+# Local data and generated outputs
+Data/
+.cache/
+
+# Local Python environment and bytecode
+.venv/
+__pycache__/
+*.py[cod]
+
+# macOS metadata
+.DS_Store
