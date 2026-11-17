@@ -1,84 +1,78 @@
-// Router + shared state. Routes: #/fleet · #/tool/<ref> · #/cycle/<file_id>
+// Router + shared state.
+// Routes: #/studies · #/settings · #/study/<id>/<tab>[/<tool>[/<file_id>]]
+//   tabs: overview · ingest · individual · group · validate
 import { get, purge, esc, day } from "./ui.js";
-import { renderFleet } from "./fleet.js";
-import { renderTool } from "./tool.js";
-import { renderCycle } from "./cycle.js";
+import { renderStudyHome, renderStudy } from "./study.js";
+import { renderSettings, applyTheme } from "./settings.js";
 
 const app = document.getElementById("app");
-
 const stored = (() => { try { return JSON.parse(localStorage.getItem("setitec.state") || "{}"); } catch { return {}; } })();
+const PERSIST = ["study", "tool", "cycle", "signal", "includeKo", "kpi", "heatMode", "groupBy", "groupKey", "groupCustom", "groupFeatures", "colorBy"];
 export const state = {
-  tool: stored.tool ?? null,
-  cycle: stored.cycle ?? null,
-  signal: stored.signal ?? "torque",
-  includeKo: stored.includeKo ?? true,
-  kpi: stored.kpi ?? "torque_mean",
-  heatMode: stored.heatMode ?? "heatmap",
-  logFilter: "all",
+  study: null, tool: null, cycle: null, signal: "torque", includeKo: true, kpi: "torque_mean", heatMode: "heatmap",
+  groupBy: null, groupKey: null, groupCustom: null, groupFeatures: null, colorBy: "cluster",
+  ...Object.fromEntries(PERSIST.filter((k) => stored[k] != null).map((k) => [k, stored[k]])),
+  logFilter: "all", outlierFilter: "all",
 };
+function persist() {
+  try { localStorage.setItem("setitec.state", JSON.stringify(Object.fromEntries(PERSIST.map((k) => [k, state[k]])))); } catch {}
+}
 export function setState(patch, rerender = true) {
   Object.assign(state, patch);
-  try {
-    const { tool, cycle, signal, includeKo, kpi, heatMode } = state;
-    localStorage.setItem("setitec.state", JSON.stringify({ tool, cycle, signal, includeKo, kpi, heatMode }));
-  } catch {}
+  persist();
   if (rerender) route();
 }
 export const go = (hash) => { location.hash = hash; };
 
+// Links inside the current study
+const sid = () => encodeURIComponent(state.study || "showcase-study");
+export const tabHref = (tab) => `#/study/${sid()}/${tab}`;
+export const toolHref = (ref) => `#/study/${sid()}/individual/${encodeURIComponent(ref)}`;
+export const cycleHref = (ref, fileId) => `#/study/${sid()}/individual/${encodeURIComponent(ref)}/${fileId}`;
+
 let token = 0;
 async function route() {
   const my = ++token;
-  const [, view = "fleet", arg] = location.hash.replace(/^#\/?/, "#/").split("/");
-  const fleet = await get("/api/fleet");
-
-  let target = view;
-  if (view === "tool" && !arg) return go(`#/tool/${state.tool ?? fleet.tools[0].tool_ref}`);
-  if (view === "cycle" && !arg) {
-    if (state.cycle) return go(`#/cycle/${state.cycle}`);
-    const t = await get(`/api/tool/${state.tool ?? fleet.tools[0].tool_ref}`);
-    return go(`#/cycle/${t.holes.file_id[0]}`);
-  }
-  if (!["fleet", "tool", "cycle"].includes(view)) return go("#/fleet");
-
-  document.querySelectorAll(".views a").forEach((a) => {
-    if (a.dataset.view === target) a.setAttribute("aria-current", "page");
-    else a.removeAttribute("aria-current");
-  });
-
+  const parts = location.hash.replace(/^#\/?/, "").split("/").map(decodeURIComponent);
+  const view = parts[0] || "studies";
   app.classList.add("loading");
   try {
+    const fleet = await get("/api/fleet");
+    // legacy routes from the first version of the dashboard
+    if (view === "fleet") return go(tabHref("group"));
+    if (view === "tool") return go(toolHref(parts[1] || fleet.tools[0].tool_ref));
+    if (view === "cycle" && parts[1]) { const C = await get(`/api/cycle/${+parts[1]}`); return go(cycleHref(C.tool_ref, C.file_id)); }
+    if (view === "preferences") return go("#/settings");
+    if (!["studies", "study", "settings"].includes(view)) return go("#/studies");
+
     const html = document.createElement("div");
     let after;
-    if (view === "fleet") after = await renderFleet(html, fleet);
-    else if (view === "tool") { state.tool = arg; after = await renderTool(html, fleet, arg); }
-    else { after = await renderCycle(html, fleet, +arg); }
+    if (view === "studies") renderStudyHome(html, fleet);
+    else if (view === "settings") after = renderSettings(html, fleet);
+    else {
+      state.study = parts[1] || "showcase-study";
+      after = await renderStudy(html, fleet, state.study, parts[2] || "overview", parts[3], parts[4]);
+      if (after === false) return; // redirected
+    }
     if (my !== token) return;
     purge(app);
     app.replaceChildren(...html.childNodes);
     after?.(app);
-    setState({}, false);
+    persist();
+    const total = fleet.totals;
+    document.getElementById("dataset").textContent = `${fleet.tools.length} tools · ${total.n} cycles · ${day(total.start)} – ${day(total.end)} ${new Date(total.end).getFullYear()}`;
   } catch (e) {
     console.error(e);
-    app.innerHTML = `<div class="empty-state">Could not load this view (${esc(e.message)}). <a href="#/fleet">Back to fleet</a></div>`;
-  } finally {
-    if (my === token) app.classList.remove("loading");
-  }
+    app.innerHTML = `<div class="startup-error"><h1>Data could not be loaded</h1><p>${esc(e.message)}</p><p>Check that <code>Data/Output Data</code> exists, then restart the server.</p></div>`;
+  } finally { if (my === token) app.classList.remove("loading"); }
 }
 
-// Theme toggle: explicit choice wins over the OS setting, charts re-render with new tokens
 document.getElementById("theme-btn").addEventListener("click", () => {
   const dark = getComputedStyle(document.documentElement).colorScheme.includes("dark");
-  const next = dark ? "light" : "dark";
-  document.documentElement.dataset.theme = next;
-  try { localStorage.setItem("setitec.theme", next); } catch {}
+  applyTheme(dark ? "light" : "dark");
   route();
 });
+document.getElementById("profile-btn").addEventListener("click", () => go("#/settings"));
 matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => route());
-
 window.addEventListener("hashchange", () => { window.scrollTo(0, 0); route(); });
-get("/api/fleet").then((f) => {
-  document.getElementById("dataset").textContent =
-    `${f.tools.length} tools · ${f.totals.n} cycles · ${day(f.totals.start)} – ${day(f.totals.end)} ${new Date(f.totals.end).getFullYear()}`;
-});
 route();

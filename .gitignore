@@ -4,8 +4,14 @@ Data/
 
 # Local Python environment and bytecode
 .venv/
+venv/
 __pycache__/
 *.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Private working notes
+HANDOFF.local.md
 
 # macOS metadata
 .DS_Store

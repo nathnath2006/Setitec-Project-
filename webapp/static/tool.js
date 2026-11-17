@@ -1,10 +1,10 @@
 // Tool view: one drill — program, wear trend, depth signature, failures, cycle log.
 import {
-  get, esc, fmt, pct, date, day, diam, stepName, colors, plot, mix, rgba, scaleColors, statusBadge, outcomeBadge,
+  get, esc, fmt, pct, date, day, diam, stepName, colors, plot, mix, rgba, scaleColors, outcomeBadge,
   outcomeLegend, tiles, seg, onSeg, table, divergingBg, emptyState, signatureHtml, envelope, colMean, quantile,
-  relChange, rollingMedian, pearson, KPIS, SIGNALS, MAKERS,
+  relChange, rollingMedian, pearson, info, toolSelect, groupUrl, reasonText, KPIS, SIGNALS,
 } from "./ui.js";
-import { state, setState, go } from "./app.js";
+import { state, setState, go, toolHref, cycleHref, tabHref } from "./app.js";
 
 const ROLL = 7; // rolling-median window (cycles) on the wear chart
 
@@ -16,84 +16,77 @@ export async function renderTool(root, fleet, ref) {
   const sig = SIGNALS[state.signal];
   const H = rows(d.holes);
   const byIdx = new Map(H.map((h) => [h.hole_idx, h]));
-  const order = fleet.tools.map((t) => t.tool_ref);
+  const order = [...fleet.tools].sort((a, b) => a.diameter - b.diameter || a.maker.localeCompare(b.maker)).map((t) => t.tool_ref); // same order as the picker
   const i = order.indexOf(ref);
   const prev = order[(i - 1 + order.length) % order.length], next = order[(i + 1) % order.length];
   const cuttingSteps = d.program.filter((p) => p.regime !== "approach" && d.step_feat.step.includes(p.step));
+  // Group outliers: this tool scored against every tool of the same diameter (Group tab, default features)
+  const peers = fleet.tools.filter((t) => t.diameter === S.diameter).map((t) => t.tool_ref);
+  const G = await get(groupUrl(peers)).catch(() => null);
+  const outliers = new Map();
+  if (G) G.points.file_id.forEach((f, i) => { if (G.points.outlier[i] && G.points.tool_ref[i] === ref) outliers.set(f, G.points.reasons[i]); });
+  H.forEach((h) => { h.outlier = outliers.get(h.file_id) || null; });
 
   root.innerHTML = `
-  <div class="page-head">
-    <div class="titles">
-      <div class="crumbs"><a href="#/fleet">Fleet</a> / ${esc(ref)}</div>
-      <div class="title-row">
-        <h1><span class="mono" style="font-size:20px">${esc(ref)}</span> <span class="ink-2" style="font-weight:400">${esc(S.maker)} ${diam(S.diameter)} mm</span></h1>
-        ${statusBadge(S.status, true)}
-      </div>
-      <div class="meta">
-        <span>Head <b class="mono">${esc(S.head)}</b></span>
-        <span><b>${S.n}</b> cycles</span>
-        <span>${date(S.start, true)} → ${date(S.end)} <span class="muted">(${fmt(S.span_h, 1)} h)</span></span>
-      </div>
-    </div>
-    <div class="cycle-nav">
-      <a class="btn" href="#/tool/${prev}" title="Previous tool">‹ <span class="mono">${prev}</span></a>
-      <a class="btn" href="#/tool/${next}" title="Next tool"><span class="mono">${next}</span> ›</a>
-    </div>
-  </div>
-
   <div class="filters">
-    <div class="filter"><span class="lbl">Tool</span><div class="tool-chips">${toolChips(fleet, ref)}</div></div>
+    <div class="filter"><span class="lbl">Tool</span>${toolSelect(fleet, ref)}
+      <a class="btn btn-icon" href="${toolHref(prev)}" title="Previous tool (${prev})" aria-label="Previous tool">‹</a><a class="btn btn-icon" href="${toolHref(next)}" title="Next tool (${next})" aria-label="Next tool">›</a></div>
     <div class="filter"><span class="lbl">Signal</span>${seg("signal", Object.entries(SIGNALS).map(([k, v]) => [k, v.label]), state.signal)}</div>
     <div class="filter"><span class="lbl">Cycles</span>${seg("cycles", [["all", "All"], ["ok", "OK only"]], includeKo ? "all" : "ok")}</div>
   </div>
-  ${hasOk ? "" : `<div class="notice">${statusBadge("alert")}<span>${esc(ref)} has <b>no OK cycle</b> (all ${S.n} cycles are KO). Envelopes, drift and correlations below are computed on every cycle, so they describe this tool's own behaviour, not a healthy reference.</span></div>`}
+  <div class="tool-head">
+    <h2><span class="mono">${esc(ref)}</span> <span class="ink-2">${esc(S.maker)} ${diam(S.diameter)} mm</span></h2>
+    <div class="meta"><span>Head <b class="mono">${esc(S.head)}</b></span><span>${date(S.start, true)} → ${date(S.end)} <span class="muted">(${fmt(S.span_h, 1)} h)</span></span></div>
+  </div>
+  ${hasOk ? "" : `<div class="notice"><span class="notice-mark">!</span><span>${esc(ref)} has no OK cycle: envelopes, drift and correlations use all ${S.n} cycles.</span></div>`}
 
   <section style="margin-top:16px">
   ${tiles([
     ["Cycles", String(S.n), `${S.n_ok} OK · ${S.n_ko} KO`],
-    ["OK rate", pct(S.ok_rate, 1), statusBadge(S.status)],
+    ["OK rate", pct(S.ok_rate, 1), "controller outcome"],
     ["Cycle time", `${fmt(S.cycle_time_med, 0)}<small>s</small>`, "median"],
     ["Depth reached", `${fmt(S.depth_med, 1)}<small>mm</small>`, "median"],
     ["Specific energy", `${fmt(S.energy_mm_med, 0)}<small>J/mm</small>`, "median"],
     ["Energy drift", pct(S.drift_energy, 0, true), "first → last 10 % of cycles"],
     ["Torque P95 drift", pct(S.drift_torque, 0, true), "first → last 10 % of cycles"],
+    ["Group outliers", G ? String(outliers.size) : "–", G ? `${H.filter((h) => h.outlier && h.cycle_ok).length} OK · ${H.filter((h) => h.outlier && !h.cycle_ok).length} KO · <a href="${tabHref("group")}">${diam(S.diameter)} group</a>` : "unavailable"],
   ])}
   </section>
 
   <section>
     <div class="section-head"><h2>Drilling program</h2>
-      <p>Set-points per step as programmed (several values = the program changed during the test). Step numbers are not comparable across tools: read them through speed and feed.</p></div>
+      <p>Set-points of each step.</p>${info("Several values in a cell mean the program changed during the test. Step numbers do not mean the same thing on every tool: compare steps by speed and feed.")}</div>
     <div class="grid cols-2-1">
       <div class="card"><div class="table-wrap">${programTable(d.program)}</div></div>
-      <div class="card"><div class="card-head"><h3>Stop codes per step<span class="sub">number of cycles ending the step on each code</span></h3></div>
+      <div class="card"><div class="card-head"><h3>Stop codes per step<span class="sub">Cycles ending each step on each code.</span></h3></div>
         <div class="table-wrap">${codesTable(d.stop_codes, fleet.normal_end_code)}</div></div>
     </div>
   </section>
 
   <section>
     <div class="section-head"><h2>Wear trend</h2>
-      <p>One point per cycle, in drilling order. Line = rolling median of ${ROLL} ${hasOk ? "OK " : ""}cycles. A rising torque or energy at constant set-points is the wear signature.</p>
+      <p>The chosen indicator for each cycle, in drilling order.</p>${info(`Line = rolling median of ${ROLL} ${hasOk ? "OK " : ""}cycles. Torque or energy rising at constant set-points is the wear signature. A ring marks a group outlier: a cycle far from the other ${diam(S.diameter)} tools on at least one feature (see Group tab).`)}
       <div class="controls filter"><label for="kpi">Indicator</label>
         <select class="sel" id="kpi">${Object.entries(KPIS).map(([k, v]) => `<option value="${k}"${k === state.kpi ? " selected" : ""}>${esc(v.label)} (${v.unit})</option>`).join("")}</select></div>
     </div>
     <div class="card">
-      <div class="legend" style="margin-bottom:4px">${hasOk ? `<span><i class="dot" style="background:var(--seq-mid)"></i>OK cycle</span>` : ""}${includeKo ? `<span><i class="dot" style="background:var(--critical)"></i>KO cycle (×)</span>` : ""}<span><i class="line" style="background:var(--ink-2)"></i>Rolling median</span></div>
+      <div class="legend" style="margin-bottom:4px">${hasOk ? `<span><i class="dot" style="background:var(--seq-mid)"></i>OK cycle</span>` : ""}${includeKo ? `<span><i class="dot" style="background:var(--critical)"></i>KO cycle (×)</span>` : ""}<span><i class="line" style="background:var(--ink-2)"></i>Rolling median</span>${outliers.size ? `<span><i class="ring"></i>Group outlier</span>` : ""}</div>
       <div class="chart" id="wear"></div>
     </div>
     <div class="card" style="margin-top:12px">
-      <div class="card-head"><h3>Drift by step<span class="sub">change of each indicator, mean of the last 10 % of ${hasOk ? "OK " : ""}cycles vs the first 10 % · red = increases with use</span></h3></div>
+      <div class="card-head"><h3>Drift by step<span class="sub">Change from the first to the last 10 % of ${hasOk ? "OK " : ""}cycles. Red = increases with use.</span></h3></div>
       <div class="table-wrap" id="drift"></div>
     </div>
   </section>
 
   <section>
     <div class="section-head"><h2>Depth signature · ${esc(sig.label)}</h2>
-      <p>${esc(sig.hint)}, resampled every 0.1 mm of advance (peck retracts removed). Each row is a cycle, first cycle at the top.</p>
+      <p>${esc(sig.hint)} against depth, one row per cycle.</p>${info("Signals are resampled every 0.1 mm of advance with peck retracts removed, so cycles line up by depth. First cycle at the top; × marks a KO cycle.")}
       <div class="controls">${seg("heat", [["heatmap", "Heatmap"], ["curves", "Curves"]], state.heatMode)}</div>
     </div>
     <div class="card"><div class="chart" id="sig" style="height:460px"></div></div>
     <div class="card" style="margin-top:12px">
-      <div class="card-head"><h3>Envelope: early life vs late life<span class="sub">${esc(sig.label)} (${sig.unit}) against depth</span></h3></div>
+      <div class="card-head"><h3>Early life vs late life<span class="sub">Mean of the first and last 10 % of cycles over the 10–90 % band.</span></h3></div>
       <div class="legend" id="env-legend"></div>
       <div class="chart" id="env" style="height:340px"></div>
     </div>
@@ -101,45 +94,46 @@ export async function renderTool(root, fleet, ref) {
 
   <section>
     <div class="section-head"><h2>Failures</h2>
-      <p>KO cycles drawn over the ${hasOk ? "OK-cycle" : "all-cycle"} envelope (10–90 %). Pick a cycle to inspect it.</p></div>
+      <p>KO cycles over the ${hasOk ? "OK-cycle" : "all-cycle"} 10–90 % band. Click a cycle to open it.</p></div>
     ${S.n_ko ? `<div class="grid cols-2-1">
       <div class="card"><div class="legend"><span><i style="background:${rgba("#898781", 0.35)}"></i>${hasOk ? "OK" : "All"} cycles 10–90 %</span><span><i class="line" style="background:var(--ink-2)"></i>Median</span><span><i class="line" style="background:var(--critical)"></i>KO cycle</span></div>
         <div class="chart" id="ko" style="height:360px"></div></div>
       <div class="card"><div class="card-head"><h3>${S.n_ko} KO cycles</h3></div><div class="t-scroll" id="ko-list" style="max-height:330px"></div>
         <div style="margin-top:8px">${outcomeLegend()}</div></div>
-    </div>` : `<div class="card">${emptyState("No KO cycle for this tool.")}</div>`}
+    </div>` : `<div class="card">${emptyState("No KO cycle.")}</div>`}
   </section>
 
   <section>
-    <div class="section-head"><h2>Cycle log</h2><p>Every cycle of the tool. Click a row to open the cycle.</p>
+    <div class="section-head"><h2>Cycle log</h2><p>Click a row to open the cycle.</p>
       <div class="controls">${seg("log", [["all", "All"], ["ok", "OK"], ["ko", "KO"]], state.logFilter)}</div></div>
     <div class="card"><div class="t-scroll" id="log"></div></div>
   </section>
 
   <section>
     <details class="card" id="corr-box">
-      <summary>Feature correlations<span class="sub">Pearson r between per-step indicators, ${hasOk ? "OK" : "all"} cycles. “Cycle #” stands for accumulated use.</span></summary>
+      <summary>Feature correlations<span class="sub">Pearson r between indicators of one step. “Cycle #” = accumulated use.</span></summary>
       <div style="margin:10px 0 4px">${seg("corr", cuttingSteps.map((p) => [p.step, stepTitle(p)]), cuttingSteps[0]?.step)}</div>
       <div class="chart" id="corr" style="height:520px"></div>
     </details>
   </section>`;
 
   return (app) => {
+    app.querySelector("#tool-select").addEventListener("change", (e) => go(toolHref(e.target.value)));
     onSeg(app, "signal", (v) => setState({ signal: v }));
     onSeg(app, "cycles", (v) => setState({ includeKo: v === "all" }));
-    app.querySelector("#kpi").addEventListener("change", (e) => { setState({ kpi: e.target.value }, false); drawWear(app, d, H, cuttingSteps, includeKo, hasOk); });
+    app.querySelector("#kpi").addEventListener("change", (e) => { setState({ kpi: e.target.value }, false); drawWear(app, d, H, cuttingSteps, includeKo, hasOk, outliers); });
     onSeg(app, "heat", (v) => { setState({ heatMode: v }, false); pressSeg(app, "heat", v); drawSignature(app, d, byIdx, includeKo); });
-    onSeg(app, "log", (v) => { state.logFilter = v; pressSeg(app, "log", v); drawLog(app, H); });
+    onSeg(app, "log", (v) => { state.logFilter = v; pressSeg(app, "log", v); drawLog(app, H, d); });
     let corrStep = cuttingSteps[0]?.step;
     onSeg(app, "corr", (v) => { corrStep = +v; pressSeg(app, "corr", v); drawCorr(app, d, corrStep, hasOk); });
     app.querySelector("#corr-box").addEventListener("toggle", (e) => e.target.open && drawCorr(app, d, corrStep, hasOk));
 
-    drawWear(app, d, H, cuttingSteps, includeKo, hasOk);
+    drawWear(app, d, H, cuttingSteps, includeKo, hasOk, outliers);
     app.querySelector("#drift").innerHTML = driftTable(d, cuttingSteps, hasOk);
     drawSignature(app, d, byIdx, includeKo);
     drawEnvelope(app, d, byIdx, includeKo, hasOk);
     if (S.n_ko) drawFailures(app, d, H, byIdx, hasOk);
-    drawLog(app, H);
+    drawLog(app, H, d);
   };
 }
 
@@ -153,11 +147,6 @@ function pressSeg(app, name, v) {
 }
 const list = (a, d = null) => (a?.length ? a.map((v) => (d == null ? v : fmt(v, d))).join(" / ") : "–");
 const stepTitle = (p) => `${stepName(p.step)} · ${list(p.rpm, 0)} rpm · ${p.regime}`;
-
-function toolChips(fleet, ref) {
-  return MAKERS.map((m) => fleet.tools.filter((t) => t.maker === m).map((t) =>
-    `<a class="chip" href="#/tool/${t.tool_ref}" aria-current="${t.tool_ref === ref}" title="${esc(t.label)} · ${t.status} · ${pct(t.ok_rate)} OK"><span class="sw" style="background:var(--${m.toLowerCase()})"></span>${esc(t.tool_ref.replace("DT000", ""))}</a>`).join("")).join('<span class="chip-sep"></span>');
-}
 
 function programTable(prog) {
   return `<table class="t"><thead><tr><th>Step</th><th>Regime</th><th class="num">Spindle (rpm)</th><th class="num">Feed (mm/rev)</th><th class="num">Feed (mm/s)</th><th class="num">Peck gap (mm)</th><th class="num">Depth window (mm)</th><th class="num">Cycles</th></tr></thead>
@@ -173,7 +162,7 @@ function codesTable(sc, normal) {
 }
 
 // ---------------------------------------------------------------------------------------------
-function drawWear(app, d, H, steps, includeKo, hasOk) {
+function drawWear(app, d, H, steps, includeKo, hasOk, outliers) {
   const c = colors();
   const kpi = state.kpi, meta = KPIS[kpi];
   const F = rows(d.step_feat);
@@ -202,6 +191,11 @@ function drawWear(app, d, H, steps, includeKo, hasOk) {
       hovertemplate: `Cycle %{x} · KO<br><b>%{y:.3~f} ${meta.unit}</b><extra></extra>` });
     traces.push({ type: "scatter", mode: "lines", x: ref.map((r) => r.hole_idx), y: rollingMedian(ref.map((r) => r[kpi]), ROLL), yaxis: `y${ax}`,
       line: { color: c.ink2, width: 2 }, hoverinfo: "skip" });
+    const out = g.filter((r) => outliers.has(r.file_id) && (includeKo || r.cycle_ok));
+    if (out.length) traces.push({ type: "scatter", mode: "markers", x: out.map((r) => r.hole_idx), y: out.map((r) => r[kpi]), yaxis: `y${ax}`,
+      marker: { size: 15, symbol: "circle-open", color: c.ink, line: { width: 1.5, color: c.ink } },
+      customdata: out.map((r) => reasonText(outliers.get(r.file_id))),
+      hovertemplate: `Cycle %{x} · group outlier<br>%{customdata}<extra></extra>` });
   });
   layout.annotations = annotations;
   layout.xaxis = { title: { text: "Cycle # (drilling order)" }, anchor: n > 1 ? `y${n}` : "y", range: [0, Math.max(...H.map((h) => h.hole_idx)) + 1] };
@@ -344,10 +338,10 @@ function drawFailures(app, d, H, byIdx, hasOk) {
     { key: "date", label: "Time", html: (h) => date(h.date) },
     { key: "outcome", label: "Outcome", html: (h) => outcomeBadge(h.outcome) },
     { key: "signature", label: "Step codes", html: (h) => signatureHtml(h.signature, false) },
-  ], { sortKey: "hole_idx", sortDir: 1, onRow: (h) => go(`#/cycle/${h.file_id}`) });
+  ], { sortKey: "hole_idx", sortDir: 1, onRow: (h) => go(cycleHref(d.summary.tool_ref, h.file_id)) });
 }
 
-function drawLog(app, H) {
+function drawLog(app, H, d) {
   const f = state.logFilter;
   const data = H.filter((h) => f === "all" || (f === "ok") === h.cycle_ok);
   const el = app.querySelector("#log");
@@ -362,8 +356,9 @@ function drawLog(app, H) {
     { key: "energy_J_per_mm", label: "Spec. energy (J/mm)", num: true, html: (h) => fmt(h.energy_J_per_mm, 0) },
     { key: "torque_p95", label: "Torque P95 (A)", num: true, html: (h) => fmt(h.torque_p95, 2) },
     { key: "thrust_p95", label: "Thrust P95 (A)", num: true, html: (h) => fmt(h.thrust_p95, 2) },
+    { key: "outlier", label: "Group outlier", sort: (h) => (h.outlier ? Math.max(...h.outlier.map((r) => Math.abs(r.z))) : null), html: (h) => (h.outlier ? `<span class="outlier-tag">${esc(reasonText(h.outlier))}</span>` : "") },
     { key: "source_file", label: "File", html: (h) => `<span class="mono muted">${esc(h.source_file)}</span>` },
-  ], { sortKey: "hole_idx", sortDir: 1, onRow: (h) => go(`#/cycle/${h.file_id}`) });
+  ], { sortKey: "hole_idx", sortDir: 1, onRow: (h) => go(cycleHref(d.summary.tool_ref, h.file_id)) });
 }
 
 function drawCorr(app, d, step, hasOk) {

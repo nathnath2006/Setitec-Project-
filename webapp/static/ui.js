@@ -209,12 +209,6 @@ const ICONS = {
   watch: (c) => `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M6 .6l5.6 10.2H.4z" fill="${c}"/><path d="M6 4.3v3" stroke="#0b0b0b" stroke-width="1.4" stroke-linecap="round"/><circle cx="6" cy="9" r=".75" fill="#0b0b0b"/></svg>`,
   alert: (c) => `<svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M3.5 0h5L12 3.5v5L8.5 12h-5L0 8.5v-5z" fill="${c}"/><path d="M4 4l4 4M8 4l-4 4" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg>`,
 };
-const STATUS_LABEL = { stable: "Stable", watch: "Watch", alert: "Alert" };
-export function statusBadge(status, pill = false) {
-  const c = colors();
-  const col = { stable: c.good, watch: c.warning, alert: c.critical }[status];
-  return `<span class="status${pill ? " pill" : ""}">${ICONS[status](col)}${STATUS_LABEL[status]}</span>`;
-}
 export function outcomeBadge(outcome, pill = false) {
   const c = colors();
   const cls = `status${pill ? " pill" : ""}`;
@@ -285,4 +279,48 @@ export function divergingBg(v, cap = 0.6) {
 
 export function emptyState(msg) {
   return `<div class="empty-state">${esc(msg)}</div>`;
+}
+
+// ⓘ "How to read" popover (no JS: <details>)
+export function info(html, label = "How to read") {
+  return `<details class="info"><summary aria-label="${esc(label)}" title="${esc(label)}">i</summary><div class="info-pop">${html}</div></details>`;
+}
+
+// ---------- user settings (Settings page) ----------
+const SETTINGS_KEY = "setitec.settings";
+export const SETTINGS_DEFAULTS = { z: 3.5, kmin: 2, kmax: 4, groupBy: "diameter" };
+export function settings() {
+  try { return { ...SETTINGS_DEFAULTS, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || "{}") }; } catch { return { ...SETTINGS_DEFAULTS }; }
+}
+export function saveSettings(patch) {
+  const next = { ...settings(), ...patch };
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(next)); } catch {}
+  return next;
+}
+
+// ---------- group analysis ----------
+export const FEATURES = {
+  torque_p95: { label: "Torque P95", unit: "A" },
+  thrust_p95: { label: "Thrust P95", unit: "A" },
+  torque_mean: { label: "Mean torque", unit: "A" },
+  energy_J_per_mm: { label: "Specific energy", unit: "J/mm" },
+  cycle_time_s: { label: "Cycle time", unit: "s" },
+  thrust_mean: { label: "Mean thrust", unit: "A" },
+  gap_max: { label: "Max peck gap", unit: "mm" },
+};
+export const DEFAULT_FEATURES = ["torque_p95", "thrust_p95", "torque_mean", "energy_J_per_mm", "cycle_time_s"];
+export const CLUSTER_COLORS = ["#2a78d6", "#eb6834", "#1baf7a", "#8a5cd1", "#c79a1e", "#d0457a", "#4a9fb5", "#7b7a74"];
+export function groupUrl(refs, features = DEFAULT_FEATURES) {
+  const s = settings();
+  return `/api/group?tools=${[...refs].sort().join(",")}&features=${features.join(",")}&z=${s.z}&kmin=${s.kmin}&kmax=${s.kmax}`;
+}
+export function reasonText(reasons) {
+  return reasons.map((r) => `${FEATURES[r.feature]?.label ?? r.feature} ${r.z > 0 ? "+" : "−"}${Math.abs(r.z).toFixed(1)}σ`).join(" · ");
+}
+
+// Tool picker: one select, grouped by diameter
+export function toolSelect(fleet, ref, id = "tool-select") {
+  const ds = [...new Set(fleet.tools.map((t) => t.diameter))].sort((a, b) => a - b);
+  return `<select class="sel tool-select" id="${id}" aria-label="Tool">${ds.map((d) => `<optgroup label="${diam(d)} mm">${
+    fleet.tools.filter((t) => t.diameter === d).map((t) => `<option value="${esc(t.tool_ref)}"${t.tool_ref === ref ? " selected" : ""}>${esc(t.tool_ref)} · ${esc(t.maker)} · ${t.n} cycles</option>`).join("")}</optgroup>`).join("")}</select>`;
 }

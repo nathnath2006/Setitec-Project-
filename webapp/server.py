@@ -1,4 +1,4 @@
-"""Setitec tool-qualification dashboard: data API + static file server.
+"""Setitec tool-performance workbench: data API + static file server.
 
 Run from the project root (with the venv active):
     python webapp/server.py            # http://127.0.0.1:8050
@@ -20,14 +20,18 @@ from functools import lru_cache
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
 import helper as st  # noqa: E402
+from analysis import DEFAULT_FEATURES, FEATURES, group_analysis  # noqa: E402
+from connection import test_demo, test_remote  # noqa: E402
+from ingestion import scan_folder  # noqa: E402
 
 STATIC = HERE / "static"
 PLOTLY_JS = Path(__import__("plotly").__file__).parent / "package_data" / "plotly.min.js"
@@ -42,23 +46,11 @@ SIGNALS = {  # key -> (parquet column, label, unit)
 }
 NORMAL_END_CODE = 2048  # every OK cycle finishes its last step on this code
 
-# Screening rule shown in the UI (reliability only; wear drift is reported, not scored)
-STATUS_RULE = {"alert_below": 0.75, "watch_below": 0.90}
-
-
 # ---------------------------------------------------------------------------------------------
 # Data preparation
 # ---------------------------------------------------------------------------------------------
 def rel_change(x, y) -> float:
     return st.trend(x, y)[1]
-
-
-def status_of(ok_rate: float) -> str:
-    if ok_rate < STATUS_RULE["alert_below"]:
-        return "alert"
-    if ok_rate < STATUS_RULE["watch_below"]:
-        return "watch"
-    return "stable"
 
 
 def build() -> dict:
@@ -179,7 +171,6 @@ class Api:
             drift_energy=num(rel_change(basis["hole_idx"], basis["energy_J_per_mm"])),
             drift_torque=num(rel_change(basis["hole_idx"], basis["torque_p95"])),
             spark=dict(hole_idx=b["hole_idx"].tolist(), energy=arr(b["energy_J_per_mm"], 1)),
-            status=status_of(ok_rate),
         )
 
     def fleet(self) -> dict:
@@ -189,7 +180,7 @@ class Api:
             totals=dict(n=int(len(h)), n_ok=int(h["cycle_ok"].sum()),
                         start=h["date"].min().strftime("%Y-%m-%dT%H:%M:%S"),
                         end=h["date"].max().strftime("%Y-%m-%dT%H:%M:%S")),
-            status_rule=STATUS_RULE, normal_end_code=NORMAL_END_CODE,
+            normal_end_code=NORMAL_END_CODE,
             signals={k: dict(label=v[1], unit=v[2]) for k, v in SIGNALS.items()},
         )
 
@@ -252,6 +243,17 @@ class Api:
                             counts=codes.to_numpy().tolist()),
         )
 
+    def group(self, query: dict) -> dict:
+        known = set(self.d["tools"]["tool_ref"])
+        refs = [r for r in query.get("tools", [""])[0].split(",") if r in known]
+        if not refs:
+            raise ValueError("Choose at least one tool")
+        feats = [f for f in query.get("features", [",".join(DEFAULT_FEATURES)])[0].split(",") if f in FEATURES]
+        z = min(10.0, max(1.5, float(query.get("z", ["3.5"])[0])))
+        kmin = min(6, max(2, int(query.get("kmin", ["2"])[0])))
+        kmax = min(8, max(kmin, int(query.get("kmax", ["4"])[0])))
+        return group_analysis(self.d["holes"], refs, feats, z, kmin, kmax)
+
     def cycle(self, file_id: int) -> dict:
         d = self.d
         hrow = d["holes"][d["holes"]["file_id"] == file_id]
@@ -311,6 +313,14 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *a, **kw):
         super().__init__(*a, directory=str(STATIC), **kw)
 
+    def end_headers(self):
+        # Static app files (html/js/css) must never be served from the browser cache: Safari in
+        # particular keeps ES modules and ignores Cmd+Shift+R, so an update would not show up.
+        path = urlparse(self.path).path
+        if not path.startswith(("/api/", "/vendor/")):
+            self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def log_message(self, fmt, *args):  # quieter console
         if "/api/" in (args[0] if args else ""):
             sys.stderr.write("  " + (fmt % args) + "\n")
@@ -332,9 +342,57 @@ class Handler(SimpleHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/vendor/plotly.min.js":
             return self.send_bytes(PLOTLY_JS.read_bytes(), "text/javascript", cacheable=True)
+        if path == "/api/group":
+            return self.handle_group()
         if path.startswith("/api/"):
             return self.handle_api(path)
         return super().do_GET()
+
+    def do_POST(self):
+        path = urlparse(self.path).path
+        if path not in ("/api/ingest/scan", "/api/connection/test"):
+            return self.send_error(HTTPStatus.NOT_FOUND, "Unknown resource")
+        if self.client_address[0] not in {"127.0.0.1", "::1"}:
+            return self.send_error(HTTPStatus.FORBIDDEN, "Only available from this computer")
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > 16_384:
+                raise ValueError("Request is too large")
+            body = json.loads(self.rfile.read(length) or b"{}")
+            if path == "/api/ingest/scan":
+                folder = str(body.get("folder", "")).strip()
+                if not folder:
+                    raise ValueError("Enter a folder path to scan")
+                payload = scan_folder(folder)
+            elif body.get("mode") == "demo":
+                payload = test_demo(self.api.d, st._query)
+            else:
+                payload = test_remote(str(body.get("host", "")), int(body.get("port", 0)),
+                                      "https" if body.get("protocol") == "https" else "http")
+            self.send_json(payload)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            self.send_json({"error": str(exc)}, HTTPStatus.BAD_REQUEST)
+
+    def send_json(self, payload, status=HTTPStatus.OK):
+        if status != HTTPStatus.OK:
+            body = json.dumps(payload).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        self.send_bytes(json.dumps(payload, separators=(",", ":"), allow_nan=False).encode(), "application/json")
+
+    def handle_group(self):
+        key = self.path
+        try:
+            if key not in self.cache:
+                payload = self.api.group(parse_qs(urlparse(self.path).query))
+                self.cache[key] = json.dumps(payload, separators=(",", ":"), allow_nan=False).encode()
+            self.send_bytes(self.cache[key], "application/json")
+        except (KeyError, ValueError) as e:
+            self.send_json({"error": str(e)}, HTTPStatus.BAD_REQUEST)
 
     def handle_api(self, path: str):
         parts = path.strip("/").split("/")[1:]

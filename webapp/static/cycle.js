@@ -1,15 +1,15 @@
 // Cycle view: one drilled hole at full 100 Hz resolution, set against its tool's envelope.
 import {
   get, esc, fmt, pct, date, diam, stepName, colors, plot, rgba, outcomeBadge, tiles, seg, onSeg,
-  signatureHtml, envelope, emptyState, SIGNALS, OUTCOMES,
+  signatureHtml, envelope, emptyState, info, SIGNALS, OUTCOMES,
 } from "./ui.js";
-import { state, setState, go } from "./app.js";
+import { state, setState, go, toolHref, cycleHref } from "./app.js";
 
-let nav = { prev: null, next: null };
+let nav = { ref: null, prev: null, next: null };
 document.addEventListener("keydown", (e) => {
-  if (!location.hash.startsWith("#/cycle/") || e.target.closest?.("input, select, textarea")) return;
-  if (e.key === "ArrowLeft" && nav.prev) go(`#/cycle/${nav.prev}`);
-  if (e.key === "ArrowRight" && nav.next) go(`#/cycle/${nav.next}`);
+  if (!/\/individual\/[^/]+\/\d+$/.test(location.hash) || e.target.closest?.("input, select, textarea")) return;
+  if (e.key === "ArrowLeft" && nav.prev != null) go(cycleHref(nav.ref, nav.prev));
+  if (e.key === "ArrowRight" && nav.next != null) go(cycleHref(nav.ref, nav.next));
 });
 
 const ROWS = [
@@ -24,7 +24,7 @@ export async function renderCycle(root, fleet, fileId) {
   const C = await get(`/api/cycle/${fileId}`);
   const T = await get(`/api/tool/${C.tool_ref}`);
   const S = T.summary;
-  nav = { prev: C.prev, next: C.next };
+  nav = { ref: C.tool_ref, prev: C.prev, next: C.next };
   setState({ cycle: fileId, tool: C.tool_ref }, false);
   const k = C.kpi;
   const sig = SIGNALS[state.signal];
@@ -32,9 +32,9 @@ export async function renderCycle(root, fleet, fileId) {
   root.innerHTML = `
   <div class="page-head">
     <div class="titles">
-      <div class="crumbs"><a href="#/fleet">Fleet</a> / <a href="#/tool/${esc(C.tool_ref)}">${esc(C.tool_ref)}</a> / Cycle ${C.hole_idx}</div>
+      <div class="crumbs"><a href="${toolHref(C.tool_ref)}">‹ ${esc(C.tool_ref)}</a> / Cycle ${C.hole_idx}</div>
       <div class="title-row">
-        <h1>Cycle ${C.hole_idx} <span class="ink-2" style="font-weight:400">of ${C.n_holes} · <span class="mono" style="font-size:18px">${esc(C.tool_ref)}</span> ${esc(S.maker)} ${diam(S.diameter)}</span></h1>
+        <h2 class="cycle-title">Cycle ${C.hole_idx} <span class="ink-2" style="font-weight:400">of ${C.n_holes} · <span class="mono" style="font-size:18px">${esc(C.tool_ref)}</span> ${esc(S.maker)} ${diam(S.diameter)}</span></h2>
         ${outcomeBadge(C.outcome, true)}
       </div>
       <div class="meta">
@@ -44,8 +44,8 @@ export async function renderCycle(root, fleet, fileId) {
       </div>
     </div>
     <div class="cycle-nav">
-      <a class="btn" href="#/cycle/${C.prev ?? ""}" aria-disabled="${!C.prev}">‹ Previous</a>
-      <a class="btn" href="#/cycle/${C.next ?? ""}" aria-disabled="${!C.next}">Next ›</a>
+      <a class="btn" href="${C.prev == null ? "#" : cycleHref(C.tool_ref, C.prev)}" aria-disabled="${C.prev == null}">‹ Previous</a>
+      <a class="btn" href="${C.next == null ? "#" : cycleHref(C.tool_ref, C.next)}" aria-disabled="${C.next == null}">Next ›</a>
       <span class="muted" style="font-size:12px"><kbd>←</kbd> <kbd>→</kbd></span>
     </div>
   </div>
@@ -67,12 +67,12 @@ export async function renderCycle(root, fleet, fileId) {
   </section>
 
   <section>
-    <div class="section-head"><h2>Time trace</h2><p>Raw signals at ${C.series.t.length > 1 ? "100 Hz" : "–"}. Shaded bands = program steps; × on the depth trace = stop-code events (hover for the code). Drag to zoom, double-click to reset.</p></div>
-    <div class="card">${C.valid ? `<div class="chart" id="trace" style="height:760px"></div>` : emptyState("This cycle has no usable recording (fewer than 50 samples).")}</div>
+    <div class="section-head"><h2>Time trace</h2><p>Raw signals at 100 Hz; shaded bands are program steps.</p>${info("× on the depth trace marks a stop-code event (hover for the code). Drag to zoom, double-click to reset.")}</div>
+    <div class="card">${C.valid ? `<div class="chart" id="trace" style="height:760px"></div>` : emptyState("No usable recording (fewer than 50 samples).")}</div>
   </section>
 
   <section>
-    <div class="section-head"><h2>Against the tool envelope</h2><p>This cycle compared with the ${S.n_ok ? "OK" : "other"} cycles of ${esc(C.tool_ref)}, by depth.</p>
+    <div class="section-head"><h2>Against the tool envelope</h2><p>This cycle over the 10–90 % band of the ${S.n_ok ? "OK" : "other"} cycles of ${esc(C.tool_ref)}.</p>
       <div class="controls">${seg("signal", Object.entries(SIGNALS).map(([key, v]) => [key, v.label]), state.signal)}</div></div>
     <div class="card">
       <div class="legend"><span><i style="background:${rgba("#898781", 0.35)}"></i>${S.n_ok ? "OK" : "Other"} cycles, 10–90 %</span><span><i class="line" style="background:var(--ink-2)"></i>Median</span><span><i class="line" style="background:var(--${C.cycle_ok ? "seq-mid" : "critical"})"></i>Cycle ${C.hole_idx}</span></div>
@@ -82,8 +82,8 @@ export async function renderCycle(root, fleet, fileId) {
 
   <section>
     <div class="grid cols-2">
-      <div class="card"><div class="card-head"><h3>Program set-points<span class="sub">as recorded in this cycle's file</span></h3></div><div class="table-wrap">${programTable(C.program)}</div></div>
-      <div class="card"><div class="card-head"><h3>Step results<span class="sub">reported by the controller</span></h3></div><div class="table-wrap">${resultsTable(C.step_results, fleet.normal_end_code)}</div></div>
+      <div class="card"><div class="card-head"><h3>Program set-points</h3></div><div class="table-wrap">${programTable(C.program)}</div></div>
+      <div class="card"><div class="card-head"><h3>Step results<span class="sub">Reported by the controller.</span></h3></div><div class="table-wrap">${resultsTable(C.step_results, fleet.normal_end_code)}</div></div>
     </div>
   </section>`;
 
